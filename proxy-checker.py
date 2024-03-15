@@ -29,16 +29,23 @@ total_proxies = 0
 working_proxies = 0
 
 with open('proxies.txt', 'w') as f:
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
         for url in proxy_urls:
             proxies = get_proxies(url)
             total_proxies += len(proxies)
             print(f"{Fore.YELLOW}Checking {len(proxies)} proxies from {url}.{Style.RESET_ALL} This may take some time...")
             logging.info(f"Checking {len(proxies)} proxies from {url}.")
-            for proxy in executor.map(check_proxy, proxies):
-                if proxy is not None:
-                    f.write(proxy + '\n')
-                    working_proxies += 1
+            future_to_proxy = {executor.submit(check_proxy, proxy): proxy for proxy in proxies}
+            for future in concurrent.futures.as_completed(future_to_proxy):
+                proxy = future_to_proxy[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logging.error(f"{proxy} generated an exception: {exc}")
+                else:
+                    if result is not None:
+                        f.write(result + '\n')
+                        working_proxies += 1
 
 end_time = time.time()
 execution_time = end_time - start_time
