@@ -13,10 +13,9 @@ logging.basicConfig(filename='logs.txt', level=logging.INFO)
 
 # List of URLs to check proxies
 proxy_urls = {
-    "https": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
-    "http": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
-    "socks4": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
-    "socks5": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"
+    "http": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "socks4": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+    "socks5": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
 }
 
 def check_proxy(proxy):
