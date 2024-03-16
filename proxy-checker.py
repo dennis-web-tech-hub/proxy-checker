@@ -1,40 +1,56 @@
 import requests
 import concurrent.futures
 import time
+import os
 from colorama import Fore, Style, init
 import logging
 
+# Initialize colorama
 init()
 
+# Set up logging
 logging.basicConfig(filename='logs.txt', level=logging.INFO)
 
-proxy_urls = [
-    # Url list
-]
+# List of URLs to check proxies
+proxy_urls = {
+    "https": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+    "http": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+    "socks4": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+    "socks5": "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"
+}
 
 def check_proxy(proxy):
     try:
         response = requests.get('http://www.google.com', proxies={'http': proxy, 'https': proxy}, timeout=1)
         if response.status_code == 200:
             return proxy
-    except:
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error checking proxy {proxy}: {e}")
         return None
 
 def get_proxies(url):
-    response = requests.get(url)
-    return response.text.split('\n')
+    try:
+        response = requests.get(url)
+        return response.text.split('\n')
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error getting proxies from {url}: {e}")
+        return []
+
+# Create a directory for the proxies
+if not os.path.exists('proxies'):
+    os.makedirs('proxies')
 
 start_time = time.time()
 total_proxies = 0
 working_proxies = 0
 
-with open('proxies.txt', 'w') as f:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
-        for url in proxy_urls:
+with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+    for proxy_type, url in proxy_urls.items():
+        with open(f'proxies/{proxy_type}.txt', 'w') as f:
             proxies = get_proxies(url)
             total_proxies += len(proxies)
-            print(f"{Fore.YELLOW}Checking {len(proxies)} proxies from {url}.{Style.RESET_ALL} This may take some time...")
-            logging.info(f"Checking {len(proxies)} proxies from {url}.")
+            print(f"{Fore.YELLOW}Checking {len(proxies)} {proxy_type} proxies from {url}.{Style.RESET_ALL} This may take some time...")
+            logging.info(f"Checking {len(proxies)} {proxy_type} proxies from {url}.")
             future_to_proxy = {executor.submit(check_proxy, proxy): proxy for proxy in proxies}
             for future in concurrent.futures.as_completed(future_to_proxy):
                 proxy = future_to_proxy[future]

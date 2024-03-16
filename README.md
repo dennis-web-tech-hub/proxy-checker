@@ -6,9 +6,11 @@ Proxy Checker is a Python program that checks proxy servers for functionality an
 ## Installation
 1. Ensure you have Python 3 installed.
 2. Install the necessary libraries using pip:
+
    ```
-   pip install requests colorama
+   pip install -r requirements.txt
    ```
+   
 3. Download and run the script.
 
 ## Usage
