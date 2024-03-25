@@ -20,7 +20,9 @@ proxy_urls = {
 
 def check_proxy(proxy):
     try:
-        response = requests.get('http://www.google.com', proxies={'http': proxy, 'https': proxy}, timeout=1)
+        session = requests.Session()
+        session.proxies = {'http': proxy, 'https': proxy}
+        response = session.get('http://www.google.com', timeout=1)
         if response.status_code == 200:
             return proxy
     except requests.exceptions.RequestException as e:
@@ -30,7 +32,7 @@ def check_proxy(proxy):
 def get_proxies(url):
     try:
         response = requests.get(url)
-        return response.text.split('\n')
+        return response.text.splitlines()
     except requests.exceptions.RequestException as e:
         logging.error(f"Error getting proxies from {url}: {e}")
         return []
@@ -43,24 +45,26 @@ start_time = time.time()
 total_proxies = 0
 working_proxies = 0
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=500) as executor:
     for proxy_type, url in proxy_urls.items():
         with open(f'proxies/{proxy_type}.txt', 'w') as f:
             proxies = get_proxies(url)
             total_proxies += len(proxies)
             print(f"{Fore.YELLOW}Checking {len(proxies)} {proxy_type} proxies from {url}.{Style.RESET_ALL} This may take some time...")
             logging.info(f"Checking {len(proxies)} {proxy_type} proxies from {url}.")
-            future_to_proxy = {executor.submit(check_proxy, proxy): proxy for proxy in proxies}
-            for future in concurrent.futures.as_completed(future_to_proxy):
-                proxy = future_to_proxy[future]
+            working_proxy_list = []
+            futures = [executor.submit(check_proxy, proxy) for proxy in proxies]
+            for future in concurrent.futures.as_completed(futures):
                 try:
                     result = future.result()
                 except Exception as exc:
-                    logging.error(f"{proxy} generated an exception: {exc}")
+                    logging.error(f"Proxy check generated an exception: {exc}")
                 else:
                     if result is not None:
-                        f.write(result + '\n')
+                        working_proxy_list.append(result)  # Add working proxy to list for batch writing
                         working_proxies += 1
+            # Batch write the working proxies to the file
+            f.write('\n'.join(working_proxy_list) + '\n')
 
 end_time = time.time()
 execution_time = end_time - start_time
