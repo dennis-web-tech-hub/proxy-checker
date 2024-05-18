@@ -1,23 +1,87 @@
 # Proxy Checker
 
-## Description
-Proxy Checker is a Python program that checks proxy servers for functionality and saves working proxies to a file.
+This script is designed to check the availability of HTTP, SOCKS4, and SOCKS5 proxies from various online sources. It uses multithreading to efficiently process large lists of proxies, saving the working ones into separate files based on their type.
 
-## Installation
-1. Ensure you have Python 3 installed.
-2. Install the necessary libraries using pip:
+## Features
 
-   ```
-   pip install -r requirements.txt
-   ```
-   
-3. Download and run the script.
+- Fetches proxy lists from specified URLs.
+- Checks the availability of each proxy.
+- Saves working proxies into separate files for HTTP, SOCKS4, and SOCKS5.
+- Uses multithreading for fast execution.
+- Configurable timeout and number of threads.
 
-## Proxy Sources
-This script uses a predefined list of URLs to check proxies. You can modify this list to include your own sources. If you're looking for a source of proxies, you might find [this repository](https://github.com/TheSpeedX/PROXY-List) by TheSpeedX useful. It contains a regularly updated list of proxies.
+## Prerequisites
+
+- Python 3.x
+- Required Python packages:
+  - `requests`
+  - `colorama`
+
+You can install the required packages using pip:
+
+```bash
+pip install requests colorama
+```
 
 ## Usage
-Simply run the script, and it will start checking proxy servers from the predefined list of URLs. Working proxy servers will be saved to separate files based on their type (HTTP, HTTPS, SOCKS4, SOCKS5) within a directory named `proxies`.
 
-## Logging
-The program also logs to a file named `logs.txt`, which contains information about the number of proxies checked and the execution time.
+1. **Clone the repository or download the script.**
+
+2. **Run the script:**
+
+   ```bash
+   python proxy_checker.py
+   ```
+
+   The script will start checking proxies and will display the progress in the terminal. 
+
+3. **Results:**
+
+   Working proxies will be saved in the `proxies` directory, categorized by their type (http, socks4, socks5).
+
+## Configuration
+
+You can adjust the configurable parameters at the top of the script:
+
+- `TIMEOUT`: The timeout for checking each proxy (default is 1 second).
+- `MAX_WORKERS`: The maximum number of threads to use (default is 500).
+
+```python
+# Configurable parameters
+TIMEOUT = 1
+MAX_WORKERS = 500
+```
+
+## Output
+
+The script prints the following information to the console:
+
+- The number of proxies checked for each type.
+- The number of working proxies found.
+- The total execution time.
+
+Example output:
+
+```
+Checking 100 http proxies from https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt. This may take some time...
+Checking 100 socks4 proxies from https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt. This may take some time...
+Checking 100 socks5 proxies from https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt. This may take some time...
+Checked 300 proxies. Working proxies: 45.
+Execution time: 0 minutes 30 seconds.
+```
+
+## Directory Structure
+
+- `proxy_checker.py`: The main script file.
+- `proxies/`: Directory where the working proxies will be saved.
+  - `http.txt`: Working HTTP proxies.
+  - `socks4.txt`: Working SOCKS4 proxies.
+  - `socks5.txt`: Working SOCKS5 proxies.
+
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+## Acknowledgements
+
+- Proxy lists sourced from [TheSpeedX/PROXY-List](https://github.com/TheSpeedX/PROXY-List).
