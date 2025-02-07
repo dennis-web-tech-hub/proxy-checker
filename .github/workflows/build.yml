@@ -37,7 +37,7 @@ jobs:
 
     - name: Package Application
       run: |
-        pyinstaller --noconfirm --onefile --windowed --name "Proxy.Checker" "main.py"
+        pyinstaller --noconfirm --onefile --windowed --name "Proxy.Checker" "proxy-checker.py"
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
