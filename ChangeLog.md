@@ -1,5 +1,6 @@
 ### Summary
 
+- A new **"Check for Update"** button has been added.
 - In GUI mode, check the **"Detailed Results"** box to record response times. Then choose the export format ("txt" or "csv") from the combo box. In console mode, use `--detailed` and `--export-format` accordingly.
 - After a run, you can click **"Show Statistics"** to view a summary or **"Save Log"** to store the log output.
 

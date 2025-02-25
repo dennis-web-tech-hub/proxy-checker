@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
     QComboBox, QFileDialog
 )
 
+# Define the current version of this tool.
+CURRENT_VERSION = "1.2.8"
+
 class ProxyChecker:
     """
     Fetches proxy lists from given URLs and checks if they work.
@@ -406,7 +409,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.show_results_btn)
         main_layout.addLayout(btn_layout)
 
-        # Extra Buttons: Show Statistics and Save Log
+        # Extra Buttons: Show Statistics, Save Log, and Check for Update
         extra_btn_layout = QHBoxLayout()
         self.show_stats_btn = QPushButton("Show Statistics")
         self.show_stats_btn.setEnabled(False)
@@ -416,6 +419,11 @@ class MainWindow(QMainWindow):
         self.save_log_btn = QPushButton("Save Log")
         self.save_log_btn.clicked.connect(self.save_log)
         extra_btn_layout.addWidget(self.save_log_btn)
+
+        self.check_update_btn = QPushButton("Check for Update")
+        self.check_update_btn.clicked.connect(self.check_for_update)
+        extra_btn_layout.addWidget(self.check_update_btn)
+
         main_layout.addLayout(extra_btn_layout)
 
         # Log Text Area
@@ -541,7 +549,6 @@ class MainWindow(QMainWindow):
 
     def show_statistics(self):
         """Show a dialog with summary statistics."""
-        # Attempt to get statistics from the worker's checker.
         if self.worker and self.worker.checker:
             stats = self.worker.checker.get_statistics()
         else:
@@ -559,7 +566,43 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 QMessageBox.warning(self, "Error", f"Failed to save log: {e}")
 
+    def check_for_update(self):
+        """Checks the GitHub API for the latest release."""
+        try:
+            response = requests.get("https://api.github.com/repos/Jesewe/proxy-checker/releases/latest", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            latest_version = data["tag_name"].lstrip("v")
+            if latest_version != CURRENT_VERSION:
+                msg = (f"New version available: {latest_version}.\n"
+                       f"You are using version {CURRENT_VERSION}.\n"
+                       f"Visit {data['html_url']} to download the update.")
+            else:
+                msg = f"You are up-to-date with version {CURRENT_VERSION}."
+            QMessageBox.information(self, "Update Check", msg)
+        except Exception as e:
+            QMessageBox.warning(self, "Update Check", f"Failed to check for updates: {e}")
+
+def check_update_console(current_version: str):
+    """Check for updates in console mode and print the result."""
+    try:
+        response = requests.get("https://api.github.com/repos/Jesewe/proxy-checker/releases/latest", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        latest_version = data["tag_name"].lstrip("v")
+        if latest_version != current_version:
+            print(f"New version available: {latest_version}. You are using version {current_version}.")
+            print(f"Visit {data['html_url']} to download the update.")
+        else:
+            print(f"You are up-to-date with version {current_version}.")
+    except Exception as e:
+        print(f"Failed to check for updates: {e}")
+
 def console_main(args):
+    if args.check_update:
+        check_update_console(CURRENT_VERSION)
+        return
+
     proxy_urls = {
         "http": args.http_url,
         "socks4": args.socks4_url,
@@ -594,6 +637,7 @@ def console_main(args):
 def main():
     parser = argparse.ArgumentParser(description="Proxy Checker Tool")
     parser.add_argument("--console", action="store_true", help="Run in console mode without GUI")
+    parser.add_argument("--check-update", action="store_true", help="Check for updates and exit")
     parser.add_argument("--timeout", type=int, default=3, help="Timeout in seconds")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries")
     parser.add_argument("--retry-delay", type=float, default=1.0, help="Delay between retries in seconds")
