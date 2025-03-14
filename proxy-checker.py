@@ -2,11 +2,11 @@ import sys
 import os
 import time
 import csv
+import json
 import logging
-import argparse
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Dict, Callable, Union, Tuple
+from typing import List, Optional, Dict, Callable, Union
 from threading import Event
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
@@ -18,13 +18,13 @@ from PyQt6.QtWidgets import (
 )
 
 # Define the current version of this tool.
-CURRENT_VERSION = "1.2.8"
+CURRENT_VERSION = "1.2.9"
 
 class ProxyChecker:
     """
     Fetches proxy lists from given URLs and checks if they work.
     Supports cancellation, progress reporting, and collects optional detailed
-    response times for working proxies.
+    response times, anonymity classification, and geo-location details for working proxies.
     """
     def __init__(self,
                  proxy_urls: Dict[str, str],
@@ -34,7 +34,7 @@ class ProxyChecker:
                  max_workers: int = 20,
                  check_url: str = "http://www.google.com",
                  detailed_results: bool = False,
-                 export_format: str = "txt",  # or "csv"
+                 export_format: str = "txt",  # or "csv" or "json"
                  log_callback: Optional[Callable[[str], None]] = None,
                  progress_callback: Optional[Callable[[int], None]] = None):
         """
@@ -44,8 +44,8 @@ class ProxyChecker:
         :param retry_delay: Delay between retries in seconds.
         :param max_workers: Number of concurrent threads for checking proxies.
         :param check_url: URL used to test proxies.
-        :param detailed_results: If True, record response times for working proxies.
-        :param export_format: "txt" for plain text output or "csv" for CSV format.
+        :param detailed_results: If True, record response times, anonymity and geo info for working proxies.
+        :param export_format: "txt" for plain text output, "csv" for CSV, or "json" for JSON export.
         :param log_callback: Callback for log messages.
         :param progress_callback: Callback to update overall progress (0–100).
         """
@@ -70,10 +70,20 @@ class ProxyChecker:
         # Store detailed working results by type.
         # For each proxy type, the value is a list of either:
         # - a string (if not detailed) or
-        # - a tuple (proxy, response_time)
-        self.working_results: Dict[str, List[Union[str, Tuple[str, float]]]] = {}
+        # - a dict (if detailed) with keys: proxy, response_time, anonymity, geo
+        self.working_results: Dict[str, List[Union[str, Dict[str, Union[str, float, dict]]]]] = {}
 
         self.session = requests.Session()
+
+        # Determine the client IP to help with anonymity detection.
+        try:
+            r = requests.get("https://api.ipify.org?format=json", timeout=3)
+            r.raise_for_status()
+            self.client_ip = r.json().get("ip")
+            self.log("info", f"Client IP determined as {self.client_ip}")
+        except requests.RequestException:
+            self.client_ip = "unknown"
+            self.log("warning", "Could not determine client IP for anonymity detection.")
 
     def log(self, level: str, message: str) -> None:
         full_message = f"{level.upper()}: {message}"
@@ -86,10 +96,39 @@ class ProxyChecker:
         self.cancel_event.set()
         self.log("info", "Cancellation requested.")
 
-    def check_proxy(self, proxy: str) -> Optional[Union[str, Tuple[str, float]]]:
+    def determine_anonymity(self, proxy: str) -> str:
+        """
+        Determines the anonymity of the proxy by comparing the IP it returns
+        with the client IP.
+        """
+        try:
+            session = requests.Session()
+            session.proxies = {'http': proxy, 'https': proxy}
+            r = session.get("https://api.ipify.org?format=json", timeout=self.timeout)
+            r.raise_for_status()
+            proxy_ip = r.json().get("ip")
+            if proxy_ip == self.client_ip:
+                return "transparent"
+            else:
+                return "anonymous"
+        except requests.RequestException:
+            return "unknown"
+
+    def get_geo_info(self, ip: str) -> dict:
+        """
+        Retrieves geographical information for a given IP address using ip-api.com.
+        """
+        try:
+            r = requests.get(f"http://ip-api.com/json/{ip}", timeout=3)
+            r.raise_for_status()
+            return r.json()  # Contains country, regionName, city, etc.
+        except requests.RequestException:
+            return {}
+
+    def check_proxy(self, proxy: str) -> Optional[Union[str, dict]]:
         """
         Checks if a single proxy works by sending a request to self.check_url.
-        Returns either the proxy (or a tuple of proxy and response time) if successful;
+        Returns either the proxy (or a dict of details if detailed) if successful;
         otherwise, returns None.
         """
         if self.cancel_event.is_set():
@@ -102,7 +141,16 @@ class ProxyChecker:
             elapsed = time.time() - start
             if response.status_code == 200:
                 if self.detailed_results:
-                    return (proxy, elapsed)
+                    anonymity = self.determine_anonymity(proxy)
+                    # Assume proxy is in the format ip:port; extract IP for geo lookup.
+                    ip_only = proxy.split(':')[0]
+                    geo = self.get_geo_info(ip_only)
+                    return {
+                        "proxy": proxy,
+                        "response_time": elapsed,
+                        "anonymity": anonymity,
+                        "geo": geo
+                    }
                 else:
                     return proxy
         except requests.RequestException:
@@ -148,7 +196,7 @@ class ProxyChecker:
 
         total_proxies = len(proxies)
         self.log("info", f"Checking {total_proxies} {proxy_type} proxies with {self.max_workers} workers.")
-        working_proxy_list = []  # type: List[Union[str, Tuple[str, float]]]
+        working_proxy_list = []  # type: List[Union[str, dict]]
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(self.check_proxy, proxy): proxy for proxy in proxies}
             for future in as_completed(futures):
@@ -167,24 +215,45 @@ class ProxyChecker:
         self.working_results[proxy_type] = working_proxy_list
 
         # Choose file extension based on export format
-        file_ext = ".csv" if self.export_format == "csv" else ".txt"
+        if self.export_format == "csv":
+            file_ext = ".csv"
+        elif self.export_format == "json":
+            file_ext = ".json"
+        else:
+            file_ext = ".txt"
         proxy_file = f'proxies/{proxy_type}{file_ext}'
         self.create_proxy_dir(os.path.dirname(proxy_file))
         try:
-            with open(proxy_file, 'w', newline='') as f:
-                if self.export_format == "csv" and self.detailed_results:
-                    writer = csv.writer(f)
-                    writer.writerow(["Proxy", "Response Time (s)"])
-                    for item in working_proxy_list:
-                        writer.writerow([item[0], f"{item[1]:.2f}"])
-                elif self.export_format == "csv" and not self.detailed_results:
-                    writer = csv.writer(f)
-                    writer.writerow(["Proxy"])
-                    for item in working_proxy_list:
-                        writer.writerow([item])
-                else:  # Plain text format
+            if self.export_format == "csv":
+                with open(proxy_file, 'w', newline='') as f:
                     if self.detailed_results:
-                        lines = [f"{item[0]} - {item[1]:.2f} s" for item in working_proxy_list]
+                        writer = csv.writer(f)
+                        writer.writerow(["Proxy", "Response Time (s)", "Anonymity", "Country", "Region", "City"])
+                        for item in working_proxy_list:
+                            geo = item.get("geo", {})
+                            writer.writerow([
+                                item.get("proxy"),
+                                f"{item.get('response_time', 0):.2f}",
+                                item.get("anonymity"),
+                                geo.get("country", ""),
+                                geo.get("regionName", ""),
+                                geo.get("city", "")
+                            ])
+                    else:
+                        writer = csv.writer(f)
+                        writer.writerow(["Proxy"])
+                        for item in working_proxy_list:
+                            writer.writerow([item])
+            elif self.export_format == "json":
+                with open(proxy_file, 'w') as f:
+                    json.dump(working_proxy_list, f, indent=4)
+            else:  # Plain text format
+                with open(proxy_file, 'w') as f:
+                    if self.detailed_results:
+                        lines = [
+                            f"{item.get('proxy')} - {item.get('response_time'):.2f} s - {item.get('anonymity')} - {item.get('geo', {}).get('country', '')}"
+                            for item in working_proxy_list
+                        ]
                     else:
                         lines = working_proxy_list
                     f.write('\n'.join(lines) + '\n')
@@ -203,7 +272,7 @@ class ProxyChecker:
         if self.detailed_results:
             all_times = []
             for lst in self.working_results.values():
-                all_times.extend([item[1] for item in lst if isinstance(item, tuple)])
+                all_times.extend([item.get("response_time") for item in lst if isinstance(item, dict)])
             if all_times:
                 avg_time = sum(all_times) / len(all_times)
                 stats += f"Average response time: {avg_time:.2f} seconds\n"
@@ -350,13 +419,13 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(self.test_url_edit, 2, 1, 1, 3)
 
         # Detailed Results Option
-        self.detailed_checkbox = QCheckBox("Detailed Results (Include Response Time)")
+        self.detailed_checkbox = QCheckBox("Detailed Results (Include Response Time, Anonymity & Geo)")
         config_layout.addWidget(self.detailed_checkbox, 3, 0, 1, 2)
 
         # Export Format Option
         config_layout.addWidget(QLabel("Export Format:"), 3, 2)
         self.export_format_combo = QComboBox()
-        self.export_format_combo.addItems(["txt", "csv"])
+        self.export_format_combo.addItems(["txt", "csv", "json"])
         config_layout.addWidget(self.export_format_combo, 3, 3)
 
         config_group.setLayout(config_layout)
@@ -423,7 +492,6 @@ class MainWindow(QMainWindow):
         self.check_update_btn = QPushButton("Check for Update")
         self.check_update_btn.clicked.connect(self.check_for_update)
         extra_btn_layout.addWidget(self.check_update_btn)
-
         main_layout.addLayout(extra_btn_layout)
 
         # Log Text Area
@@ -583,84 +651,66 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Update Check", f"Failed to check for updates: {e}")
 
-def check_update_console(current_version: str):
-    """Check for updates in console mode and print the result."""
-    try:
-        response = requests.get("https://api.github.com/repos/Jesewe/proxy-checker/releases/latest", timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        latest_version = data["tag_name"].lstrip("v")
-        if latest_version != current_version:
-            print(f"New version available: {latest_version}. You are using version {current_version}.")
-            print(f"Visit {data['html_url']} to download the update.")
-        else:
-            print(f"You are up-to-date with version {current_version}.")
-    except Exception as e:
-        print(f"Failed to check for updates: {e}")
+class ProxyCheckerWorker(QObject):
+    """
+    Worker class to run the proxy checking process in a separate thread.
+    Emits log messages, progress updates, and a finished signal.
+    """
+    log_signal = pyqtSignal(str)
+    progress_update = pyqtSignal(int)
+    finished = pyqtSignal()
 
-def console_main(args):
-    if args.check_update:
-        check_update_console(CURRENT_VERSION)
-        return
+    def __init__(self,
+                 proxy_urls: Dict[str, str],
+                 timeout: int,
+                 max_retries: int,
+                 retry_delay: float,
+                 max_workers: int,
+                 check_url: str,
+                 detailed_results: bool,
+                 export_format: str):
+        super().__init__()
+        self.proxy_urls = proxy_urls
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.max_workers = max_workers
+        self.check_url = check_url
+        self.detailed_results = detailed_results
+        self.export_format = export_format
+        self.checker: Optional[ProxyChecker] = None
 
-    proxy_urls = {
-        "http": args.http_url,
-        "socks4": args.socks4_url,
-        "socks5": args.socks5_url
-    }
-    def log_cb(msg: str):
-        print(msg)
-    def progress_cb(progress: int):
-        print(f"Progress: {progress}%")
-    checker = ProxyChecker(
-        proxy_urls=proxy_urls,
-        timeout=args.timeout,
-        max_retries=args.max_retries,
-        retry_delay=args.retry_delay,
-        max_workers=args.max_workers,
-        check_url=args.test_url,
-        detailed_results=args.detailed,
-        export_format=args.export_format,
-        log_callback=log_cb,
-        progress_callback=progress_cb
-    )
-    try:
-        print("Starting proxy checking in console mode. Press Ctrl+C to cancel.")
-        checker.run()
-    except KeyboardInterrupt:
-        checker.cancel()
-        print("Cancellation requested. Exiting...")
-    finally:
-        print("Done.")
-        print(checker.get_statistics())
+    def log_callback(self, message: str) -> None:
+        self.log_signal.emit(message)
 
-def main():
-    parser = argparse.ArgumentParser(description="Proxy Checker Tool")
-    parser.add_argument("--console", action="store_true", help="Run in console mode without GUI")
-    parser.add_argument("--check-update", action="store_true", help="Check for updates and exit")
-    parser.add_argument("--timeout", type=int, default=3, help="Timeout in seconds")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries")
-    parser.add_argument("--retry-delay", type=float, default=1.0, help="Delay between retries in seconds")
-    parser.add_argument("--max-workers", type=int, default=50, help="Number of concurrent workers")
-    parser.add_argument("--http-url", type=str, default="https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-                        help="URL for HTTP proxies")
-    parser.add_argument("--socks4-url", type=str, default="https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-                        help="URL for SOCKS4 proxies")
-    parser.add_argument("--socks5-url", type=str, default="https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-                        help="URL for SOCKS5 proxies")
-    parser.add_argument("--test-url", type=str, default="http://www.google.com", help="URL used to test proxies")
-    parser.add_argument("--detailed", action="store_true", help="Enable detailed results with response times")
-    parser.add_argument("--export-format", type=str, choices=["txt", "csv"], default="txt", help="Export format for working proxies")
-    args = parser.parse_args()
+    def progress_callback(self, progress: int) -> None:
+        self.progress_update.emit(progress)
 
-    if args.console:
-        console_main(args)
-    else:
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        app = QApplication(sys.argv)
-        window = MainWindow()
-        window.show()
-        sys.exit(app.exec())
+    def cancel(self) -> None:
+        if self.checker is not None:
+            self.checker.cancel()
+
+    def run(self) -> None:
+        self.checker = ProxyChecker(
+            proxy_urls=self.proxy_urls,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay,
+            max_workers=self.max_workers,
+            check_url=self.check_url,
+            detailed_results=self.detailed_results,
+            export_format=self.export_format,
+            log_callback=self.log_callback,
+            progress_callback=self.progress_callback
+        )
+        self.log_callback("Starting proxy checking...")
+        self.checker.run()
+        self.log_callback("Proxy checking finished.")
+        self.finished.emit()
 
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
