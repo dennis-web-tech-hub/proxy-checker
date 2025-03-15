@@ -1,9 +1,11 @@
 ### Summary
 
-- **GUI-Only Version:** Removed all command-line interface (CLI) functionality. The application now launches directly into the PyQt6 graphical user interface.
+- **Automatic Update Check:** Update detection runs automatically after startup.
 
-- **Anonymity Detection:** Added functionality to determine whether a proxy is transparent (revealing the client’s IP) or anonymous.
+- **Pause/Resume:** Users can now pause and resume the proxy-checking process via a dedicated button.
 
-- **Geo-Location Lookup:** Integrated geo-location data retrieval using the ip-api.com API to display country, region, and city details for each working proxy.
+- **Custom User-Agent:** A new option to specify a custom User-Agent for all HTTP requests.
 
-![Downloads](https://img.shields.io/github/downloads/Jesewe/proxy-checker/v1.2.9/total?style=for-the-badge&logo=github&color=D5006D) ![Platforms](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&color=D5006D) ![License](https://img.shields.io/github/license/jesewe/cs2-triggerbot?style=for-the-badge&color=D5006D)
+- **History Logging:** Summary statistics are logged to a `history.log` file after each run.
+
+![Downloads](https://img.shields.io/github/downloads/Jesewe/proxy-checker/v1.3.0/total?style=for-the-badge&logo=github&color=D5006D) ![Platforms](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&color=D5006D) ![License](https://img.shields.io/github/license/jesewe/proxy-checker?style=for-the-badge&color=D5006D)

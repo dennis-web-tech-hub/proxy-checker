@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict, Callable, Union
 from threading import Event
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox, QDoubleSpinBox,
@@ -18,12 +18,12 @@ from PyQt6.QtWidgets import (
 )
 
 # Define the current version of this tool.
-CURRENT_VERSION = "1.2.9"
+CURRENT_VERSION = "1.3.0"
 
 class ProxyChecker:
     """
     Fetches proxy lists from given URLs and checks if they work.
-    Supports cancellation, progress reporting, and collects optional detailed
+    Supports cancellation, pause/resume, progress reporting, and collects optional detailed
     response times, anonymity classification, and geo-location details for working proxies.
     """
     def __init__(self,
@@ -35,20 +35,9 @@ class ProxyChecker:
                  check_url: str = "http://www.google.com",
                  detailed_results: bool = False,
                  export_format: str = "txt",  # or "csv" or "json"
+                 user_agent: Optional[str] = None,
                  log_callback: Optional[Callable[[str], None]] = None,
                  progress_callback: Optional[Callable[[int], None]] = None):
-        """
-        :param proxy_urls: Mapping of proxy type to URL.
-        :param timeout: Request timeout in seconds.
-        :param max_retries: Maximum number of retries when fetching proxies.
-        :param retry_delay: Delay between retries in seconds.
-        :param max_workers: Number of concurrent threads for checking proxies.
-        :param check_url: URL used to test proxies.
-        :param detailed_results: If True, record response times, anonymity and geo info for working proxies.
-        :param export_format: "txt" for plain text output, "csv" for CSV, or "json" for JSON export.
-        :param log_callback: Callback for log messages.
-        :param progress_callback: Callback to update overall progress (0–100).
-        """
         self.proxy_urls = proxy_urls
         self.timeout = timeout
         self.max_retries = max_retries
@@ -57,9 +46,11 @@ class ProxyChecker:
         self.check_url = check_url
         self.detailed_results = detailed_results
         self.export_format = export_format.lower()
+        self.user_agent = user_agent
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.cancel_event = Event()
+        self.pause_event = Event()  # When set, processing is paused
 
         # Statistics counters
         self.total_proxies_checked = 0
@@ -68,12 +59,11 @@ class ProxyChecker:
         self.overall_processed_count = 0
 
         # Store detailed working results by type.
-        # For each proxy type, the value is a list of either:
-        # - a string (if not detailed) or
-        # - a dict (if detailed) with keys: proxy, response_time, anonymity, geo
         self.working_results: Dict[str, List[Union[str, Dict[str, Union[str, float, dict]]]]] = {}
 
         self.session = requests.Session()
+        if self.user_agent:
+            self.session.headers["User-Agent"] = self.user_agent
 
         # Determine the client IP to help with anonymity detection.
         try:
@@ -96,53 +86,50 @@ class ProxyChecker:
         self.cancel_event.set()
         self.log("info", "Cancellation requested.")
 
+    def pause(self) -> None:
+        self.pause_event.set()
+        self.log("info", "Proxy checking paused.")
+
+    def resume(self) -> None:
+        self.pause_event.clear()
+        self.log("info", "Proxy checking resumed.")
+
     def determine_anonymity(self, proxy: str) -> str:
-        """
-        Determines the anonymity of the proxy by comparing the IP it returns
-        with the client IP.
-        """
         try:
             session = requests.Session()
             session.proxies = {'http': proxy, 'https': proxy}
             r = session.get("https://api.ipify.org?format=json", timeout=self.timeout)
             r.raise_for_status()
             proxy_ip = r.json().get("ip")
-            if proxy_ip == self.client_ip:
-                return "transparent"
-            else:
-                return "anonymous"
+            return "transparent" if proxy_ip == self.client_ip else "anonymous"
         except requests.RequestException:
             return "unknown"
 
     def get_geo_info(self, ip: str) -> dict:
-        """
-        Retrieves geographical information for a given IP address using ip-api.com.
-        """
         try:
             r = requests.get(f"http://ip-api.com/json/{ip}", timeout=3)
             r.raise_for_status()
-            return r.json()  # Contains country, regionName, city, etc.
+            return r.json()
         except requests.RequestException:
             return {}
 
     def check_proxy(self, proxy: str) -> Optional[Union[str, dict]]:
-        """
-        Checks if a single proxy works by sending a request to self.check_url.
-        Returns either the proxy (or a dict of details if detailed) if successful;
-        otherwise, returns None.
-        """
         if self.cancel_event.is_set():
             return None
+        # If paused, wait until resumed.
+        while self.pause_event.is_set():
+            time.sleep(0.1)
         try:
             start = time.time()
             session = requests.Session()
             session.proxies = {'http': proxy, 'https': proxy}
+            if self.user_agent:
+                session.headers["User-Agent"] = self.user_agent
             response = session.get(self.check_url, timeout=self.timeout)
             elapsed = time.time() - start
             if response.status_code == 200:
                 if self.detailed_results:
                     anonymity = self.determine_anonymity(proxy)
-                    # Assume proxy is in the format ip:port; extract IP for geo lookup.
                     ip_only = proxy.split(':')[0]
                     geo = self.get_geo_info(ip_only)
                     return {
@@ -157,7 +144,6 @@ class ProxyChecker:
             return None
 
     def get_proxies(self, url: str) -> List[str]:
-        """Fetches a list of proxies from a URL using retry logic."""
         for attempt in range(self.max_retries):
             if self.cancel_event.is_set():
                 self.log("info", "Cancellation detected while fetching proxies.")
@@ -181,10 +167,6 @@ class ProxyChecker:
                         proxy_type: str,
                         url: Optional[str] = None,
                         proxies: Optional[List[str]] = None) -> int:
-        """
-        Checks and saves working proxies for a given type.
-        If a proxies list is provided, it is used instead of fetching from the URL.
-        """
         if proxies is None and url is not None:
             proxies = self.get_proxies(url)
         if self.cancel_event.is_set():
@@ -196,10 +178,12 @@ class ProxyChecker:
 
         total_proxies = len(proxies)
         self.log("info", f"Checking {total_proxies} {proxy_type} proxies with {self.max_workers} workers.")
-        working_proxy_list = []  # type: List[Union[str, dict]]
+        working_proxy_list = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(self.check_proxy, proxy): proxy for proxy in proxies}
             for future in as_completed(futures):
+                while self.pause_event.is_set():
+                    time.sleep(0.1)
                 if self.cancel_event.is_set():
                     self.log("info", "Cancellation detected during proxy checking loop.")
                     break
@@ -211,16 +195,8 @@ class ProxyChecker:
                 if result:
                     working_proxy_list.append(result)
 
-        # Save the working results in memory
         self.working_results[proxy_type] = working_proxy_list
-
-        # Choose file extension based on export format
-        if self.export_format == "csv":
-            file_ext = ".csv"
-        elif self.export_format == "json":
-            file_ext = ".json"
-        else:
-            file_ext = ".txt"
+        file_ext = ".csv" if self.export_format == "csv" else ".json" if self.export_format == "json" else ".txt"
         proxy_file = f'proxies/{proxy_type}{file_ext}'
         self.create_proxy_dir(os.path.dirname(proxy_file))
         try:
@@ -247,7 +223,7 @@ class ProxyChecker:
             elif self.export_format == "json":
                 with open(proxy_file, 'w') as f:
                     json.dump(working_proxy_list, f, indent=4)
-            else:  # Plain text format
+            else:
                 with open(proxy_file, 'w') as f:
                     if self.detailed_results:
                         lines = [
@@ -266,7 +242,6 @@ class ProxyChecker:
         return len(working_proxy_list)
 
     def get_statistics(self) -> str:
-        """Returns a summary of the checking process."""
         stats = f"Total proxies checked: {self.total_proxies_checked}\n"
         stats += f"Working proxies found: {self.working_proxies_found}\n"
         if self.detailed_results:
@@ -279,7 +254,6 @@ class ProxyChecker:
         return stats
 
     def run(self) -> None:
-        """Runs the proxy checking process for all proxy types."""
         start_time = time.time()
         self.overall_total_count = 0
         self.overall_processed_count = 0
@@ -304,11 +278,16 @@ class ProxyChecker:
 
         self.session.close()
         end_time = time.time()
-        execution_time = end_time - start_time
-        minutes, seconds = divmod(execution_time, 60)
+        minutes, seconds = divmod(end_time - start_time, 60)
         self.log("info", f"Total proxies checked: {self.total_proxies_checked}. Working proxies: {self.working_proxies_found}.")
         self.log("info", f"Execution time: {int(minutes)} minutes {int(seconds)} seconds.")
         self.log("info", "Statistics:\n" + self.get_statistics())
+        # Append history log
+        try:
+            with open("history.log", "a") as hist_file:
+                hist_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {self.get_statistics()}\n")
+        except OSError as e:
+            self.log("error", f"Failed to write history log: {e}")
 
 class ProxyCheckerWorker(QObject):
     """
@@ -327,7 +306,8 @@ class ProxyCheckerWorker(QObject):
                  max_workers: int,
                  check_url: str,
                  detailed_results: bool,
-                 export_format: str):
+                 export_format: str,
+                 user_agent: Optional[str] = None):
         super().__init__()
         self.proxy_urls = proxy_urls
         self.timeout = timeout
@@ -337,6 +317,7 @@ class ProxyCheckerWorker(QObject):
         self.check_url = check_url
         self.detailed_results = detailed_results
         self.export_format = export_format
+        self.user_agent = user_agent
         self.checker: Optional[ProxyChecker] = None
 
     def log_callback(self, message: str) -> None:
@@ -359,6 +340,7 @@ class ProxyCheckerWorker(QObject):
             check_url=self.check_url,
             detailed_results=self.detailed_results,
             export_format=self.export_format,
+            user_agent=self.user_agent,
             log_callback=self.log_callback,
             progress_callback=self.progress_callback
         )
@@ -367,14 +349,39 @@ class ProxyCheckerWorker(QObject):
         self.log_callback("Proxy checking finished.")
         self.finished.emit()
 
+class UpdateChecker(QObject):
+    """
+    Worker class to check for software updates.
+    """
+    update_checked = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            response = requests.get("https://api.github.com/repos/Jesewe/proxy-checker/releases/latest", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            latest_version = data["tag_name"].lstrip("v")
+            if latest_version != CURRENT_VERSION:
+                msg = (f"New version available: {latest_version}.\n"
+                       f"You are using version {CURRENT_VERSION}.\n"
+                       f"Visit {data['html_url']} to download the update.")
+            else:
+                msg = f"You are up-to-date with version {CURRENT_VERSION}."
+        except Exception as e:
+            msg = f"Failed to check for updates: {e}"
+        self.update_checked.emit(msg)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Proxy Checker")
-        self.setGeometry(100, 100, 850, 700)
+        self.setGeometry(100, 100, 850, 750)
         self.init_ui()
         self.thread: Optional[QThread] = None
         self.worker: Optional[ProxyCheckerWorker] = None
+        self.update_thread: Optional[QThread] = None
+        self.last_checker: Optional[ProxyChecker] = None
+        self.is_paused = False
 
     def init_ui(self):
         main_widget = QWidget()
@@ -418,15 +425,21 @@ class MainWindow(QMainWindow):
         self.test_url_edit = QLineEdit("http://www.google.com")
         config_layout.addWidget(self.test_url_edit, 2, 1, 1, 3)
 
+        # Custom User-Agent
+        config_layout.addWidget(QLabel("Custom User-Agent:"), 3, 0)
+        self.user_agent_edit = QLineEdit("")
+        self.user_agent_edit.setPlaceholderText("Leave blank for default")
+        config_layout.addWidget(self.user_agent_edit, 3, 1, 1, 3)
+
         # Detailed Results Option
         self.detailed_checkbox = QCheckBox("Detailed Results (Include Response Time, Anonymity & Geo)")
-        config_layout.addWidget(self.detailed_checkbox, 3, 0, 1, 2)
+        config_layout.addWidget(self.detailed_checkbox, 4, 0, 1, 2)
 
         # Export Format Option
-        config_layout.addWidget(QLabel("Export Format:"), 3, 2)
+        config_layout.addWidget(QLabel("Export Format:"), 4, 2)
         self.export_format_combo = QComboBox()
         self.export_format_combo.addItems(["txt", "csv", "json"])
-        config_layout.addWidget(self.export_format_combo, 3, 3)
+        config_layout.addWidget(self.export_format_combo, 4, 3)
 
         config_group.setLayout(config_layout)
         main_layout.addWidget(config_group)
@@ -447,7 +460,6 @@ class MainWindow(QMainWindow):
             checkbox.setChecked(True)
             self.proxy_type_checkboxes[proxy_type] = checkbox
             proxy_layout.addWidget(checkbox, row, 0)
-
             url_edit = QLineEdit(url)
             self.proxy_url_edits[proxy_type] = url_edit
             proxy_layout.addWidget(url_edit, row, 1)
@@ -467,6 +479,11 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.start_checking)
         btn_layout.addWidget(self.start_btn)
 
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        btn_layout.addWidget(self.pause_btn)
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_checking)
@@ -478,7 +495,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.show_results_btn)
         main_layout.addLayout(btn_layout)
 
-        # Extra Buttons: Show Statistics, Save Log, and Check for Update
+        # Extra Buttons: Show Statistics, Save Log
         extra_btn_layout = QHBoxLayout()
         self.show_stats_btn = QPushButton("Show Statistics")
         self.show_stats_btn.setEnabled(False)
@@ -488,10 +505,6 @@ class MainWindow(QMainWindow):
         self.save_log_btn = QPushButton("Save Log")
         self.save_log_btn.clicked.connect(self.save_log)
         extra_btn_layout.addWidget(self.save_log_btn)
-
-        self.check_update_btn = QPushButton("Check for Update")
-        self.check_update_btn.clicked.connect(self.check_for_update)
-        extra_btn_layout.addWidget(self.check_update_btn)
         main_layout.addLayout(extra_btn_layout)
 
         # Log Text Area
@@ -504,9 +517,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
     def start_checking(self):
-        """Initiate the proxy checking process."""
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
         self.show_results_btn.setEnabled(False)
         self.show_stats_btn.setEnabled(False)
         self.progress_bar.setValue(0)
@@ -524,6 +537,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Proxies Selected", "Please select at least one proxy type to check.")
             self.start_btn.setEnabled(True)
             self.cancel_btn.setEnabled(False)
+            self.pause_btn.setEnabled(False)
             return
 
         # Get settings from UI.
@@ -534,8 +548,8 @@ class MainWindow(QMainWindow):
         check_url = self.test_url_edit.text().strip()
         detailed_results = self.detailed_checkbox.isChecked()
         export_format = self.export_format_combo.currentText().strip()
+        user_agent = self.user_agent_edit.text().strip() or None
 
-        # Set up the worker and thread.
         self.thread = QThread()
         self.worker = ProxyCheckerWorker(
             proxy_urls=selected_proxy_urls,
@@ -545,18 +559,29 @@ class MainWindow(QMainWindow):
             max_workers=max_workers,
             check_url=check_url,
             detailed_results=detailed_results,
-            export_format=export_format
+            export_format=export_format,
+            user_agent=user_agent
         )
         self.worker.moveToThread(self.thread)
-
-        # Connect signals.
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_update.connect(self.progress_bar.setValue)
         self.worker.finished.connect(self.on_finished)
         self.thread.started.connect(self.worker.run)
         self.thread.finished.connect(self.thread.deleteLater)
-
         self.thread.start()
+
+    def toggle_pause(self):
+        if self.worker and self.worker.checker:
+            if not self.is_paused:
+                self.worker.checker.pause()
+                self.is_paused = True
+                self.pause_btn.setText("Resume")
+                self.append_log("Paused proxy checking.")
+            else:
+                self.worker.checker.resume()
+                self.is_paused = False
+                self.pause_btn.setText("Pause")
+                self.append_log("Resumed proxy checking.")
 
     def cancel_checking(self):
         if self.worker is not None:
@@ -572,51 +597,104 @@ class MainWindow(QMainWindow):
         self.append_log("All tasks completed.")
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
         self.show_results_btn.setEnabled(True)
         self.show_stats_btn.setEnabled(True)
         if self.thread is not None:
             self.thread.quit()
             self.thread.wait()
+        # Save a reference to the last checker for filtering results.
+        if self.worker:
+            self.last_checker = self.worker.checker
 
     def show_results(self):
-        """Open a dialog showing the working proxies from the saved files."""
-        results_text = ""
-        proxy_dir = "proxies"
-        if os.path.isdir(proxy_dir):
-            for filename in os.listdir(proxy_dir):
-                filepath = os.path.join(proxy_dir, filename)
-                results_text += f"--- {filename} ---\n"
-                try:
-                    with open(filepath, 'r') as f:
-                        results_text += f.read() + "\n"
-                except OSError as e:
-                    results_text += f"Error reading file: {e}\n"
+        # If detailed results are enabled, allow filtering by response time.
+        if self.last_checker and self.last_checker.detailed_results:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Filtered Working Proxies")
+            dialog.resize(600, 500)
+            layout = QVBoxLayout()
+
+            filter_layout = QHBoxLayout()
+            filter_layout.addWidget(QLabel("Max Response Time (s):"))
+            filter_spin = QDoubleSpinBox()
+            filter_spin.setRange(0.1, 10.0)
+            filter_spin.setSingleStep(0.1)
+            filter_spin.setValue(1.0)
+            filter_layout.addWidget(filter_spin)
+            apply_btn = QPushButton("Apply Filter")
+            filter_layout.addWidget(apply_btn)
+            layout.addLayout(filter_layout)
+
+            result_area = QTextEdit()
+            result_area.setReadOnly(True)
+            layout.addWidget(result_area)
+
+            def apply_filter():
+                threshold = filter_spin.value()
+                text = ""
+                for ptype, results in self.last_checker.working_results.items():
+                    filtered = []
+                    for item in results:
+                        if isinstance(item, dict) and item.get("response_time") <= threshold:
+                            geo = item.get("geo", {})
+                            filtered.append(f"{item.get('proxy')} - {item.get('response_time'):.2f} s - {item.get('anonymity')} - {geo.get('country', '')}")
+                    if filtered:
+                        text += f"--- {ptype} ---\n" + "\n".join(filtered) + "\n\n"
+                result_area.setText(text if text else "No proxies match the filter criteria.")
+
+            apply_btn.clicked.connect(apply_filter)
+            # Show all results initially
+            apply_filter()
+
+            btn_layout = QHBoxLayout()
+            copy_btn = QPushButton("Copy to Clipboard")
+            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(result_area.toPlainText()))
+            btn_layout.addWidget(copy_btn)
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.close)
+            btn_layout.addWidget(close_btn)
+            layout.addLayout(btn_layout)
+
+            dialog.setLayout(layout)
+            dialog.exec()
         else:
-            results_text = "No results found."
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Working Proxies")
-        dialog.resize(600, 400)
-        dlg_layout = QVBoxLayout()
-        text_area = QTextEdit()
-        text_area.setReadOnly(True)
-        text_area.setText(results_text)
-        dlg_layout.addWidget(text_area)
-        
-        btn_layout = QHBoxLayout()
-        copy_btn = QPushButton("Copy to Clipboard")
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(results_text))
-        btn_layout.addWidget(copy_btn)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.close)
-        btn_layout.addWidget(close_btn)
-        dlg_layout.addLayout(btn_layout)
-        
-        dialog.setLayout(dlg_layout)
-        dialog.exec()
+            # Fallback: read the exported files from the proxies directory.
+            results_text = ""
+            proxy_dir = "proxies"
+            if os.path.isdir(proxy_dir):
+                for filename in os.listdir(proxy_dir):
+                    filepath = os.path.join(proxy_dir, filename)
+                    results_text += f"--- {filename} ---\n"
+                    try:
+                        with open(filepath, 'r') as f:
+                            results_text += f.read() + "\n"
+                    except OSError as e:
+                        results_text += f"Error reading file: {e}\n"
+            else:
+                results_text = "No results found."
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Working Proxies")
+            dialog.resize(600, 400)
+            dlg_layout = QVBoxLayout()
+            text_area = QTextEdit()
+            text_area.setReadOnly(True)
+            text_area.setText(results_text)
+            dlg_layout.addWidget(text_area)
+
+            btn_layout = QHBoxLayout()
+            copy_btn = QPushButton("Copy to Clipboard")
+            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(results_text))
+            btn_layout.addWidget(copy_btn)
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.close)
+            btn_layout.addWidget(close_btn)
+            dlg_layout.addLayout(btn_layout)
+            dialog.setLayout(dlg_layout)
+            dialog.exec()
 
     def show_statistics(self):
-        """Show a dialog with summary statistics."""
         if self.worker and self.worker.checker:
             stats = self.worker.checker.get_statistics()
         else:
@@ -624,7 +702,6 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Statistics", stats)
 
     def save_log(self):
-        """Save the log output to a file."""
         filename, _ = QFileDialog.getSaveFileName(self, "Save Log", "", "Text Files (*.txt);;All Files (*)")
         if filename:
             try:
@@ -634,79 +711,22 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 QMessageBox.warning(self, "Error", f"Failed to save log: {e}")
 
-    def check_for_update(self):
-        """Checks the GitHub API for the latest release."""
-        try:
-            response = requests.get("https://api.github.com/repos/Jesewe/proxy-checker/releases/latest", timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            latest_version = data["tag_name"].lstrip("v")
-            if latest_version != CURRENT_VERSION:
-                msg = (f"New version available: {latest_version}.\n"
-                       f"You are using version {CURRENT_VERSION}.\n"
-                       f"Visit {data['html_url']} to download the update.")
-            else:
-                msg = f"You are up-to-date with version {CURRENT_VERSION}."
-            QMessageBox.information(self, "Update Check", msg)
-        except Exception as e:
-            QMessageBox.warning(self, "Update Check", f"Failed to check for updates: {e}")
+    def auto_check_for_update(self):
+        self.update_thread = QThread()
+        self.update_worker = UpdateChecker()
+        self.update_worker.moveToThread(self.update_thread)
+        self.update_worker.update_checked.connect(self.show_update_message)
+        self.update_thread.started.connect(self.update_worker.run)
+        self.update_thread.start()
 
-class ProxyCheckerWorker(QObject):
-    """
-    Worker class to run the proxy checking process in a separate thread.
-    Emits log messages, progress updates, and a finished signal.
-    """
-    log_signal = pyqtSignal(str)
-    progress_update = pyqtSignal(int)
-    finished = pyqtSignal()
+    def show_update_message(self, msg: str):
+        QMessageBox.information(self, "Update Check", msg)
+        self.update_thread.quit()
+        self.update_thread.wait()
 
-    def __init__(self,
-                 proxy_urls: Dict[str, str],
-                 timeout: int,
-                 max_retries: int,
-                 retry_delay: float,
-                 max_workers: int,
-                 check_url: str,
-                 detailed_results: bool,
-                 export_format: str):
-        super().__init__()
-        self.proxy_urls = proxy_urls
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.max_workers = max_workers
-        self.check_url = check_url
-        self.detailed_results = detailed_results
-        self.export_format = export_format
-        self.checker: Optional[ProxyChecker] = None
-
-    def log_callback(self, message: str) -> None:
-        self.log_signal.emit(message)
-
-    def progress_callback(self, progress: int) -> None:
-        self.progress_update.emit(progress)
-
-    def cancel(self) -> None:
-        if self.checker is not None:
-            self.checker.cancel()
-
-    def run(self) -> None:
-        self.checker = ProxyChecker(
-            proxy_urls=self.proxy_urls,
-            timeout=self.timeout,
-            max_retries=self.max_retries,
-            retry_delay=self.retry_delay,
-            max_workers=self.max_workers,
-            check_url=self.check_url,
-            detailed_results=self.detailed_results,
-            export_format=self.export_format,
-            log_callback=self.log_callback,
-            progress_callback=self.progress_callback
-        )
-        self.log_callback("Starting proxy checking...")
-        self.checker.run()
-        self.log_callback("Proxy checking finished.")
-        self.finished.emit()
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(1000, self.auto_check_for_update)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
