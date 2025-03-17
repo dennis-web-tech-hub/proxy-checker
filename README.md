@@ -2,6 +2,11 @@
    <img src="src/img/icon.png" alt="ProxyChecker" width="200" height="200"> 
    <h1>ProxyChecker</h1> 
    <p>A concurrent and efficient proxy checker for testing HTTP, SOCKS4, and SOCKS5 proxies with a modern, GUI-based interface.</p> 
+
+   ![Downloads](https://img.shields.io/github/downloads/jesewe/proxy-checker/total?style=for-the-badge&logo=github&color=D5006D)
+   ![Platforms](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&logo=windows&color=D5006D)
+   ![License](https://img.shields.io/github/license/jesewe/proxy-checker?style=for-the-badge&color=D5006D)
+   
    <a href="#features"><strong>Features</strong></a> •
    <a href="#installation"><strong>Installation</strong></a> •
    <a href="#usage"><strong>Usage</strong></a> •
